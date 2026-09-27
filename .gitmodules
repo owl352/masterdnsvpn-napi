@@ -1,0 +1,3 @@
+[submodule "MasterDnsVPN"]
+	path = MasterDnsVPN
+	url = https://github.com/masterking32/MasterDnsVPN

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+binaries/
+.build/
+.DS_Store
