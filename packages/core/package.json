@@ -1,0 +1,35 @@
+{
+  "name": "masterdnsvpn-node",
+  "version": "0.1.0",
+  "description": "Node-API bindings for the MasterDnsVPN client",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./native": "./lib/loader.cjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "lib/",
+    "binaries/"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "scripts": {
+    "build:ts": "tsc",
+    "test": "node --test test/*.test.js",
+    "prepack": "npm pkg delete devDependencies"
+  },
+  "license": "MIT"
+}

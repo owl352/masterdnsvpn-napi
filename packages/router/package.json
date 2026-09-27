@@ -1,0 +1,36 @@
+{
+  "name": "masterdnsvpn-node-router",
+  "version": "0.1.0",
+  "description": "Optional TUN / system proxy and routing rules for masterdnsvpn-node, powered by an embedded sing-box",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "binaries/"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "peerDependencies": {
+    "masterdnsvpn-node": "0.1.0"
+  },
+  "scripts": {
+    "build:ts": "tsc",
+    "test": "node --test test/*.test.js",
+    "prepack": "npm pkg delete devDependencies"
+  },
+  "license": "MIT"
+}
