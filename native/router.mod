@@ -1,13 +1,13 @@
+module masterdnsvpn-go
+
+go 1.25.5
+
 // ==============================================================================
 // MasterDnsVPN
 // Author: MasterkinG32
 // Github: https://github.com/masterking32
 // Year: 2026
 // ==============================================================================
-
-module masterdnsvpn-go
-
-go 1.25.5
 
 require (
 	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c
