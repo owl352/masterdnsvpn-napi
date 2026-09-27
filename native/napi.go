@@ -5,6 +5,9 @@ package main
 // node_api.h comes from the node-api-headers package; build.cjs puts it on
 // CGO_CFLAGS. Node-API symbols resolve against the host node process at load
 // time (dynamic_lookup on macOS, an import library for node.exe on Windows).
+//
+// The mdv_* helpers are not static so the router glue (router_napi.go, only
+// in the router build) can use them; it declares their prototypes itself.
 
 /*
 #include <stdint.h>
@@ -26,6 +29,9 @@ extern char* mdvClientInfo(uint64_t id, char** errOut);
 extern char* mdvClientStatus(uint64_t id, char** errOut);
 extern char* mdvClientConnections(uint64_t id, char** errOut);
 
+// Defined in router_napi.go (router build) or router_stub.go (core build).
+extern void mdv_register_router(napi_env env, napi_value exports);
+
 #define MDV_CHECK(env, call)                                     \
 	do {                                                         \
 		if ((call) != napi_ok) {                                 \
@@ -34,7 +40,7 @@ extern char* mdvClientConnections(uint64_t id, char** errOut);
 		}                                                        \
 	} while (0)
 
-static void mdv_throw_last_error(napi_env env) {
+void mdv_throw_last_error(napi_env env) {
 	bool pending = false;
 	napi_is_exception_pending(env, &pending);
 	if (pending) {
@@ -46,13 +52,13 @@ static void mdv_throw_last_error(napi_env env) {
 }
 
 // Throws msg as a JS Error and frees it (it was allocated by Go).
-static napi_value mdv_throw_owned(napi_env env, char* msg) {
+napi_value mdv_throw_owned(napi_env env, char* msg) {
 	napi_throw_error(env, NULL, msg);
 	mdvFree(msg);
 	return NULL;
 }
 
-static napi_value mdv_string_owned(napi_env env, char* s) {
+napi_value mdv_string_owned(napi_env env, char* s) {
 	napi_value result = NULL;
 	napi_status status = napi_create_string_utf8(env, s, NAPI_AUTO_LENGTH, &result);
 	mdvFree(s);
@@ -64,7 +70,7 @@ static napi_value mdv_string_owned(napi_env env, char* s) {
 }
 
 // Reads the first `count` arguments of the current call, throwing if fewer were passed.
-static bool mdv_args(napi_env env, napi_callback_info info, size_t count, napi_value* argv) {
+bool mdv_args(napi_env env, napi_callback_info info, size_t count, napi_value* argv) {
 	size_t argc = count;
 	if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok) {
 		mdv_throw_last_error(env);
@@ -77,7 +83,7 @@ static bool mdv_args(napi_env env, napi_callback_info info, size_t count, napi_v
 	return true;
 }
 
-static char* mdv_get_string(napi_env env, napi_value value) {
+char* mdv_get_string(napi_env env, napi_value value) {
 	size_t len = 0;
 	if (napi_get_value_string_utf8(env, value, NULL, 0, &len) != napi_ok) {
 		napi_throw_type_error(env, NULL, "expected a string argument");
@@ -88,10 +94,10 @@ static char* mdv_get_string(napi_env env, napi_value value) {
 	return buf;
 }
 
-static bool mdv_get_id(napi_env env, napi_value value, uint64_t* id) {
+bool mdv_get_id(napi_env env, napi_value value, uint64_t* id) {
 	double d = 0;
 	if (napi_get_value_double(env, value, &d) != napi_ok || d < 1) {
-		napi_throw_type_error(env, NULL, "expected a client handle");
+		napi_throw_type_error(env, NULL, "expected a handle");
 		return false;
 	}
 	*id = (uint64_t)d;
@@ -140,6 +146,32 @@ void mdvLogClose(uintptr_t token) {
 	napi_release_threadsafe_function((napi_threadsafe_function)token, napi_tsfn_release);
 }
 
+// Turns an optional onLog argument into a threadsafe function for mdvLogLine.
+// Sets *out to NULL for undefined/null. Returns false with an exception pending
+// if the value is not a function.
+bool mdv_create_log_tsfn(napi_env env, napi_value fn, napi_threadsafe_function* out) {
+	*out = NULL;
+	napi_valuetype type;
+	if (napi_typeof(env, fn, &type) != napi_ok) {
+		mdv_throw_last_error(env);
+		return false;
+	}
+	if (type == napi_undefined || type == napi_null) return true;
+	if (type != napi_function) {
+		napi_throw_type_error(env, NULL, "onLog must be a function");
+		return false;
+	}
+	napi_value name;
+	if (napi_create_string_utf8(env, "masterdnsvpn:log", NAPI_AUTO_LENGTH, &name) != napi_ok ||
+		napi_create_threadsafe_function(env, fn, NULL, name, 0, 1, NULL, NULL, NULL, mdv_log_js, out) != napi_ok) {
+		mdv_throw_last_error(env);
+		return false;
+	}
+	// Logging alone must not keep the process alive; running work does.
+	napi_unref_threadsafe_function(env, *out);
+	return true;
+}
+
 // clientCreate(optionsJson: string, onLog?: (line: string) => void): number
 // With onLog, log lines go to the callback instead of stdout.
 static napi_value mdv_client_create(napi_env env, napi_callback_info info) {
@@ -152,20 +184,7 @@ static napi_value mdv_client_create(napi_env env, napi_callback_info info) {
 	}
 
 	napi_threadsafe_function log_tsfn = NULL;
-	if (argc > 1) {
-		napi_valuetype type;
-		MDV_CHECK(env, napi_typeof(env, argv[1], &type));
-		if (type == napi_function) {
-			napi_value name;
-			MDV_CHECK(env, napi_create_string_utf8(env, "masterdnsvpn:log", NAPI_AUTO_LENGTH, &name));
-			MDV_CHECK(env, napi_create_threadsafe_function(env, argv[1], NULL, name, 0, 1, NULL, NULL, NULL, mdv_log_js, &log_tsfn));
-			// Logging alone must not keep the process alive; a running client does.
-			napi_unref_threadsafe_function(env, log_tsfn);
-		} else if (type != napi_undefined && type != napi_null) {
-			napi_throw_type_error(env, NULL, "onLog must be a function");
-			return NULL;
-		}
-	}
+	if (argc > 1 && !mdv_create_log_tsfn(env, argv[1], &log_tsfn)) return NULL;
 
 	char* options = mdv_get_string(env, argv[0]);
 	if (options == NULL) {
@@ -212,39 +231,53 @@ static void mdv_run_done_js(napi_env env, napi_value js_cb, void* context, void*
 	free(ctx);
 }
 
-// Called from the Go run goroutine (any thread).
+// Called from a Go goroutine (any thread) to settle a promise from mdv_async_begin.
 void mdvRunDone(uintptr_t token, char* err) {
 	mdv_run_ctx* ctx = (mdv_run_ctx*)token;
 	napi_call_threadsafe_function(ctx->tsfn, err, napi_tsfn_blocking);
 }
 
+// Creates a promise that Go settles later with mdvRunDone(token, err). While
+// pending it keeps the event loop alive. Returns 0 with an exception pending
+// on failure.
+uintptr_t mdv_async_begin(napi_env env, const char* name, napi_value* promise) {
+	mdv_run_ctx* ctx = calloc(1, sizeof(mdv_run_ctx));
+	napi_value resource_name;
+	if (napi_create_promise(env, &ctx->deferred, promise) != napi_ok ||
+		napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &resource_name) != napi_ok ||
+		napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, NULL, NULL, ctx, mdv_run_done_js, &ctx->tsfn) != napi_ok) {
+		free(ctx);
+		mdv_throw_last_error(env);
+		return 0;
+	}
+	return (uintptr_t)ctx;
+}
+
+// Rejects a promise from mdv_async_begin with err (owned) when the work
+// could not be handed to Go.
+void mdv_async_fail(napi_env env, uintptr_t token, char* err) {
+	mdv_run_ctx* ctx = (mdv_run_ctx*)token;
+	napi_value msg, error;
+	napi_create_string_utf8(env, err, NAPI_AUTO_LENGTH, &msg);
+	napi_create_error(env, NULL, msg, &error);
+	napi_reject_deferred(env, ctx->deferred, error);
+	napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_abort);
+	free(ctx);
+	mdvFree(err);
+}
+
 // clientStart(id: number): Promise<void>, settled when the client stops.
-// The pending threadsafe function keeps the event loop alive while it runs.
 static napi_value mdv_client_start(napi_env env, napi_callback_info info) {
 	napi_value argv[1];
 	uint64_t id;
 	if (!mdv_args(env, info, 1, argv) || !mdv_get_id(env, argv[0], &id)) return NULL;
 
-	mdv_run_ctx* ctx = calloc(1, sizeof(mdv_run_ctx));
-	napi_value promise, name;
-	if (napi_create_promise(env, &ctx->deferred, &promise) != napi_ok ||
-		napi_create_string_utf8(env, "masterdnsvpn:client", NAPI_AUTO_LENGTH, &name) != napi_ok ||
-		napi_create_threadsafe_function(env, NULL, NULL, name, 0, 1, NULL, NULL, ctx, mdv_run_done_js, &ctx->tsfn) != napi_ok) {
-		free(ctx);
-		mdv_throw_last_error(env);
-		return NULL;
-	}
+	napi_value promise;
+	uintptr_t token = mdv_async_begin(env, "masterdnsvpn:client", &promise);
+	if (token == 0) return NULL;
 
-	char* err = mdvClientStart(id, (uintptr_t)ctx);
-	if (err != NULL) {
-		napi_value msg, error;
-		napi_create_string_utf8(env, err, NAPI_AUTO_LENGTH, &msg);
-		napi_create_error(env, NULL, msg, &error);
-		napi_reject_deferred(env, ctx->deferred, error);
-		napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_abort);
-		free(ctx);
-		mdvFree(err);
-	}
+	char* err = mdvClientStart(id, token);
+	if (err != NULL) mdv_async_fail(env, token, err);
 	return promise;
 }
 
@@ -310,6 +343,7 @@ NAPI_MODULE_INIT() {
 		mdv_throw_last_error(env);
 		return NULL;
 	}
+	mdv_register_router(env, exports);
 	return exports;
 }
 */

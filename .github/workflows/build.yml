@@ -22,10 +22,12 @@ jobs:
         with:
           node-version: 24.x
 
+      # router.mod is upstream's go.mod plus sing-box, so it has the highest
+      # Go requirement of the two flavors.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: MasterDnsVPN/go.mod
-          cache-dependency-path: MasterDnsVPN/go.sum
+          go-version-file: native/router.mod
+          cache-dependency-path: native/router.sum
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -36,17 +38,25 @@ jobs:
       - name: Build
         run: npm run build:full
 
-      # Also runs the config type drift check, which needs the submodule.
+      # Runs with the router binary (the router package is installed in the
+      # workspace), including the config drift checks that need the submodule.
       - name: Test
         run: npm test
+
+      - name: Test core binary
+        run: npm test -w masterdnsvpn-node
+        env:
+          MASTERDNSVPN_NODE_FLAVOR: core
 
       - uses: actions/upload-artifact@v4
         with:
           name: build-artifact
           retention-days: 1
           path: |
-            dist
-            binaries
+            packages/core/dist
+            packages/core/binaries
+            packages/router/dist
+            packages/router/binaries
 
   test:
     name: Test ${{ matrix.os }} (Node ${{ matrix.node-version }})
@@ -55,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20.x, 22.x, 24.x]
+        node-version: [22.x, 24.x]
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v4
@@ -64,8 +74,43 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - run: npm ci
+
       - uses: actions/download-artifact@v4
         with:
           name: build-artifact
+          path: packages
 
       - run: npm test
+
+      - name: Test core binary
+        run: npm test -w masterdnsvpn-node
+        env:
+          MASTERDNSVPN_NODE_FLAVOR: core
+
+  e2e:
+    name: End-to-end (proxy + TUN, Linux)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: MasterDnsVPN/go.mod
+          cache-dependency-path: MasterDnsVPN/go.sum
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-artifact
+          path: packages
+
+      - run: ./e2e/run.sh

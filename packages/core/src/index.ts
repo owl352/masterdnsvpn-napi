@@ -18,6 +18,21 @@ interface NativeBinding {
 
 const native: NativeBinding = createRequire(import.meta.url)('../lib/loader.cjs')
 
+/**
+ * Key for a client's native handle, used by the optional
+ * masterdnsvpn-node-router package. Not part of the public API.
+ * @internal
+ */
+export const nativeHandle: unique symbol = Symbol.for('masterdnsvpn-node.handle')
+
+/**
+ * True when the router binary (from masterdnsvpn-node-router) is loaded
+ * instead of the client-only one.
+ */
+export function hasRouter (): boolean {
+  return typeof (native as unknown as Record<string, unknown>).routerCreate === 'function'
+}
+
 /** Where the config comes from; shared by the client and {@link validateConfig}. */
 export interface ConfigOptions {
   /**
@@ -198,6 +213,11 @@ export class MasterDnsVpnClient {
 
   static fromConfig (config: ClientConfig, options: Omit<ClientOptions, 'configPath' | 'config'> = {}): MasterDnsVpnClient {
     return new MasterDnsVpnClient({ ...options, config })
+  }
+
+  /** @internal */
+  get [nativeHandle] (): number {
+    return this.#id
   }
 
   get running (): boolean {

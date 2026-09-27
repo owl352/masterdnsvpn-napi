@@ -110,9 +110,10 @@ var (
 	registry   = map[uint64]*clientEntry{}
 	nextID     uint64
 
-	// The upstream logger writes to whatever os.Stdout is when it is created,
-	// so log capture swaps os.Stdout for a pipe around client construction.
-	stdoutMu sync.Mutex
+	// The upstream logger (and sing-box's, in the router build) writes to
+	// whatever os.Stdout/os.Stderr is when it is created, so log capture swaps
+	// them for a pipe around construction.
+	stdioMu sync.Mutex
 )
 
 func lookup(id uint64) *clientEntry {
@@ -186,16 +187,10 @@ func mdvLoadConfig(optionsJSON *C.char, errOut **C.char) *C.char {
 //
 //export mdvClientCreate
 func mdvClientCreate(optionsJSON *C.char, logToken C.uintptr_t, errOut **C.char) C.uint64_t {
-	var logW *os.File
-	if logToken != 0 {
-		r, w, err := os.Pipe()
-		if err != nil {
-			C.mdvLogClose(logToken)
-			setErr(errOut, err)
-			return 0
-		}
-		go forwardLogs(r, logToken)
-		logW = w
+	logW, err := newLogPipe(logToken)
+	if err != nil {
+		setErr(errOut, err)
+		return 0
 	}
 
 	id, err := createClient(C.GoString(optionsJSON), logW)
@@ -474,16 +469,42 @@ func createClient(optionsJSON string, logW *os.File) (uint64, error) {
 }
 
 // bootstrap creates the client, pointing its logger at logW when set.
-func bootstrap(cfg config.ClientConfig, logPath string, logW *os.File) (*client.Client, error) {
-	if logW == nil {
-		return client.BootstrapLoadedConfig(cfg, logPath)
+func bootstrap(cfg config.ClientConfig, logPath string, logW *os.File) (app *client.Client, err error) {
+	withRedirected(&os.Stdout, logW, func() {
+		app, err = client.BootstrapLoadedConfig(cfg, logPath)
+	})
+	return app, err
+}
+
+// withRedirected runs fn with *stream (os.Stdout or os.Stderr) set to w, or
+// just runs fn when w is nil.
+func withRedirected(stream **os.File, w *os.File, fn func()) {
+	if w == nil {
+		fn()
+		return
 	}
-	stdoutMu.Lock()
-	defer stdoutMu.Unlock()
-	stdout := os.Stdout
-	os.Stdout = logW
-	defer func() { os.Stdout = stdout }()
-	return client.BootstrapLoadedConfig(cfg, logPath)
+	stdioMu.Lock()
+	defer stdioMu.Unlock()
+	saved := *stream
+	*stream = w
+	defer func() { *stream = saved }()
+	fn()
+}
+
+// newLogPipe returns the write end of a pipe whose lines are forwarded to the
+// JS callback behind token, or nil when token is 0. mdvLogClose is called for
+// the token once the write end is closed (or right away on error).
+func newLogPipe(token C.uintptr_t) (*os.File, error) {
+	if token == 0 {
+		return nil, nil
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		C.mdvLogClose(token)
+		return nil, err
+	}
+	go forwardLogs(r, token)
+	return w, nil
 }
 
 // forwardLogs sends each line written to r to JS until the write end closes.
